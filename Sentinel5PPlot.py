@@ -1,16 +1,22 @@
-import pandas as pd
-import geopandas
-import matplotlib.pyplot as plt
-import os
 import argparse
 import concurrent.futures as cf
-from dateutil.parser import parse
-from numpy import average
+import os
 import typing as tp
 from datetime import datetime, date
 
+import geopandas
+import matplotlib.pyplot as plt
+import pandas as pd
+from dateutil.parser import parse
+from numpy import average
+
 
 def parse_path(_path: str) -> tp.Tuple:
+    """
+    Parse a path to extract the country name, date and sensed gas/spectral line
+    :param _path:str
+    :return: Tuple of country name, date, sensed gas
+    """
     file_list = _path.split(os.path.sep)[1:-1]
     index = 1
     for name in file_list:
@@ -27,7 +33,12 @@ def parse_path(_path: str) -> tp.Tuple:
     return _nation_name, _date, _gas
 
 
-def plot_nation_data(_path: str):
+def plot_nation_data(_path: str) -> None:
+    """
+    plot the heat map of the spectrum of a given country (by path) as png in the same path
+    :param _path: str
+    :return: None
+    """
 
     df = pd.read_pickle(_path)
 
@@ -54,8 +65,7 @@ def plot_nation_data(_path: str):
         cmap='jet',  # Colormap
         marker='H',  # marker layout. Here a Hexagon.
         markersize=1000 // (length * 3 + 1),
-        ax=ax,  # Base
-        # vmax=0.001  # Used as max for normalize luminance data
+        ax=ax  # Base
     )
     ax.set_title('{} {} Concentration {}'.format(nation_name, _gas, date), fontsize=65)
 
@@ -109,9 +119,9 @@ if __name__ == '__main__':
             x2 = [date.isocalendar()[1] for date in x_values if date >= delimiter]
 
             values1: tp.List[float] = [v[gas] for k, v in d[nation].items()
-                                    if datetime.strptime(k, "%Y-%m-%d").date() < delimiter and gas in v.keys()]
+                                       if datetime.strptime(k, "%Y-%m-%d").date() < delimiter and gas in v.keys()]
             values2: tp.List[float] = [v[gas] for k, v in d[nation].items()
-                                    if datetime.strptime(k, "%Y-%m-%d").date() >= delimiter and gas in v.keys()]
+                                       if datetime.strptime(k, "%Y-%m-%d").date() >= delimiter and gas in v.keys()]
 
             plt.title('{}: average {} Concentration'.format(nation, gas), fontsize=20)
 

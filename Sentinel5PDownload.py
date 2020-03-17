@@ -1,15 +1,22 @@
-import sentinel5dl
-import certifi
-import concurrent.futures as cf
-from datetime import datetime, timedelta
-import geopandas
-import s5a
-import pandas as pd
-import os
 import argparse
+import concurrent.futures as cf
+import os
+from datetime import datetime, timedelta
+
+import certifi
+import geopandas
+import pandas as pd
+import s5a
+import sentinel5dl
 
 
 def monday_of_calender_week(_year: int, _week: int) -> datetime:
+    """
+    calculates the first day of the week, of a given year and calendar week
+    :param _year: int
+    :param _week: int
+    :return: datetime
+    """
     first = datetime(_year, 1, 1)
     base = 1 if first.isocalendar()[1] == 1 else 8
     return first + timedelta(days=base - first.isocalendar()[2] + 7 * (_week - 1))
@@ -17,6 +24,15 @@ def monday_of_calender_week(_year: int, _week: int) -> datetime:
 
 def download_sentinel5_offline(start_date: datetime, length: timedelta, _country_name: str = None, _path: str = ".",
                                product: str = None) -> None:
+    """
+    Download the satellite data of a given start date for a given length. Filtered by Country Name,
+    :param start_date: datetime
+    :param length: timedelta
+    :param _country_name: str
+    :param _path: str
+    :param product: str name of the Gas, Spectral Region
+    :return: None
+    """
     begin_date = '{}.000Z'.format(start_date.isoformat())
     end_date = '{}.999Z'.format((start_date + length).isoformat())
 
@@ -64,6 +80,17 @@ def download_sentinel5_offline(start_date: datetime, length: timedelta, _country
 
 def download_sentinel5_cw(start_year: int, cw: int, _filter: str = None, _country: str = None, _path: str = ".",
                           product: str = None) -> None:
+    """
+    Download the satellite data of Sentinel5 for a given year and calendar week. filtered my different categories
+    of days and a given country
+    :param start_year: int
+    :param cw: int
+    :param _filter: str
+    :param _country: str
+    :param _path: str
+    :param product: str name of the Gas, Spectral Region
+    :return: None
+    """
     _filter = _filter.lower()
     if _filter not in ["weekend", "weekday", "mwf", "tt", "mon", "tue", "wed", "thu", "fri", "sat", "sun", None]:
         raise AttributeError
@@ -105,6 +132,12 @@ def download_sentinel5_cw(start_year: int, cw: int, _filter: str = None, _countr
 
 
 def to_pickle(directory: str) -> None:
+    """
+    save the data as pickled file (.pkl)  after filtering the values to with h3 to a resolution of 6 (3.229482772 km
+    hexagonal length)
+    :param directory: str
+    :return: None
+    """
     _files = [file for file in os.listdir(directory) if file.endswith(".nc")]
 
     data = []
