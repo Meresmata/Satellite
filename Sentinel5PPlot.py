@@ -41,30 +41,50 @@ def plot_nation_data(_path: str) -> None:
     """
 
     df = pd.read_pickle(_path)
+    df.crs = 'epsg:4326'
+    df = df.to_crs("EPSG:3857")
 
     nation_name, date, _gas = parse_path(_path)
 
     world = geopandas.read_file(geopandas.datasets.get_path('naturalearth_lowres'))
     _nation = world.query('name=="{}"'.format(nation_name))
+    _nation = _nation.to_crs("EPSG:3857")
 
     try:
-        _, miny, _, maxy = df.geometry.total_bounds
+        minx, miny, maxx, maxy = _nation.geometry.total_bounds
     except IndexError:
         print("IndexError: {}".format(_path))
         return
-    length = int(maxy - miny)
+    length: int
+    width: int
+    try:
+        length = int(maxy - miny)
+        width = int(maxx - minx)
+    except ValueError:
+        print("ValueError: {}".format(_path))
+        return
     # Define base of the plot.
-    fig, ax = plt.subplots(1, 1, figsize=(40, 40), dpi=100)
+
+    fig, ax = plt.subplots(figsize=(40, 40), dpi=100)
 
     # Disable the axes
     ax.set_axis_off()
 
+    point_size: int
+    point_length: int
+    try:
+        point_length = ((2800 * length) // width) if width > length else 2800
+        point_size = (point_length * 5600) // length
+        point_size = (point_size ** 2) // 4 + point_size * 16 - 31
+    except ValueError:
+        print("ValueError: {}".format(_path))
+        return
     # Plot the data
     df.plot(
         column='value',  # Column defining the color
         cmap='jet',  # Colormap
         marker='H',  # marker layout. Here a Hexagon.
-        markersize=1000 // (length * 3 + 1),
+        markersize=point_size,
         ax=ax  # Base
     )
     ax.set_title('{} {} Concentration {}'.format(nation_name, _gas, date), fontsize=65)
@@ -94,6 +114,7 @@ if __name__ == '__main__':
     # plot heat maps
     with cf.ProcessPoolExecutor(max_workers=os.cpu_count()//2) as executor:
         hel = list(executor.map(plot_nation_data, paths))
+    # hel = list(map(plot_nation_data, paths))
 
     # plot average concentration vs. time (CW)
     d = {}
@@ -125,11 +146,11 @@ if __name__ == '__main__':
 
             plt.title('{}: average {} Concentration'.format(nation, gas), fontsize=20)
 
-            plt.plot(x1, values1, label='2019')
+            plt.plot(x1, values1, 'o', label='2019')
             plt.xlabel('calendar week')
             plt.ylabel("concentration")
 
-            plt.plot(x2, values2, label='2020')
+            plt.plot(x2, values2, 'o', label='2020')
             plt.legend()
             plt.ylim([0, None])
             plt.savefig(os.path.join(p_dir, nation, gas))

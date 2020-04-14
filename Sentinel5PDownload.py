@@ -131,11 +131,14 @@ def download_sentinel5_cw(start_year: int, cw: int, _filter: str = None, _countr
         download_sentinel5_offline(start_date, delta, _country, _path, product)
 
 
-def to_pickle(directory: str) -> None:
+def to_pickle(directory: str, resolution: int = 5) -> None:
     """
-    save the data as pickled file (.pkl)  after filtering the values to with h3 to a resolution of 6 (3.229482772 km
-    hexagonal length)
+    save the data as pickled file (.pkl)  after filtering the values to with h3 to a resolution of
+    # LEVEL 5. 8.54 * 0.866 is circa the radii of 7.4
+    # LEVEL 6. 3.23 * 0.866 is circa the radii of 2.8
+    # LEVEL 6. 1.22 * 0.866 is circa the radii of 1.6
     :param directory: str
+    :param resolution: int h3 resolution see: https://uber.github.io/h3/#/documentation/core-library/resolution-table
     :return: None
     """
     _files = [file for file in os.listdir(directory) if file.endswith(".nc")]
@@ -151,7 +154,7 @@ def to_pickle(directory: str) -> None:
 
     data = pd.concat(data, ignore_index=True)
 
-    data = s5a.point_to_h3(data, resolution=6)
+    data = s5a.point_to_h3(data, resolution=resolution)
     data = s5a.aggregate_h3(data)
     data = s5a.h3_to_point(data)
 
