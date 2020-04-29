@@ -180,8 +180,8 @@ if __name__ == '__main__':
 
     for country in countries:
         for year in [2019, 2020]:
-            for week in range(1, 9):
-                # download_sentinel5_cw(_year, week, _country=country, _path=p_dir, product=gas, _filter="wed")
+            for week in range(1, 15):
+                download_sentinel5_cw(year, week, _country=country, _path=p_dir, product=gas, _filter="wed")
                 pass
 
     # does not with with h3 on windows?

@@ -4,7 +4,5 @@ Use Sentinel-2 (resolution 10m) data to for classification of the data points of
 
 
 # Classication 214 x 214 pixels
-1. error: most pixels black
-2. water: most pixels resemble water area, as sea, later, river
-3. urban: industrial area, city, larger villages, or several smaller villages
-4. rural: snow, desert, fields, forests, (few) smaller villages
+1. rural: snow, desert, fields, forests
+2. urban: industrial area, city, larger villages, or several smaller villages
