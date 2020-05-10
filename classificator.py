@@ -23,13 +23,13 @@ mdl: Model
 
 def log_confusion_matrix(epoch, logs):
     """
-
+    add a confusion matrix for the image tab in tensorboard
     :param epoch: int, current epoch number
     :param logs: tp.List, the metrics and loss of the current epoch
     :return: None
     """
     # Use the model to predict the values from the validation dataset.
-    # create list of 256 images, labels
+    # create list of 128 images, labels
     global val_gen
     global mdl
     itx = 128 // bch_size
@@ -63,7 +63,6 @@ def log_confusion_matrix(epoch, logs):
 def plot_confusion_matrix(cm, class_names):
     """
     Returns a matplotlib figure containing the plotted confusion matrix.
-
     Args:
     cm (array, shape = [n, n]): a confusion matrix of integer classes
     class_names (array, shape = [n]): String names of the integer classes
@@ -92,8 +91,10 @@ def plot_confusion_matrix(cm, class_names):
 
 
 def plot_to_image(figure):
-    """Converts the matplotlib plot specified by 'figure' to a PNG image and
-    returns it. The supplied figure is closed and inaccessible after this call."""
+    """
+    Converts the matplotlib plot specified by 'figure' to a PNG image and
+    returns it. The supplied figure is closed and inaccessible after this call.
+    """
     # Save the plot to a PNG in memory.
     buf = io.BytesIO()
     plt.savefig(buf, format='png')
@@ -119,7 +120,7 @@ def create_net(base_net: tp.Callable, img_h: int, img_w: int, num_classes: int):
     """
     # define our MLP network
     global mdl
-    base_model = base_net(weights=None, include_top=False, input_shape=(img_h, img_w, 3))
+    base_model = base_net(weights="imagenet", include_top=False, input_shape=(img_h, img_w, 3))
 
     # add the top of the network, to get the correct number of classes as output
     x = base_model.output
@@ -145,7 +146,7 @@ def run(train_path: str, test_path: str, epcs: int, batch_size: int, _mdl: Model
     # train the model
     checker = ModelCheckpoint(monitor='val_loss', filepath='weights.{epoch:03d}-{val_accuracy:.3f}.hdf5',
                               save_best_only=True, save_freq='epoch')
-    shower = TensorBoard(histogram_freq=1, write_graph=True)
+    shower = TensorBoard(histogram_freq=1)
     cm_callback = LambdaCallback(on_epoch_end=log_confusion_matrix)
 
     train_datagen = ImageDataGenerator(
@@ -202,7 +203,7 @@ def multi_eval(test_path: str, model_parent_path: str):
 def multi_run(train_path: str, test_path: str, epcs: int, batch_size: int, mdls: tp.List[Model],
               opt: tf.keras.optimizers):
     """
-
+    train several networks on the same dataset
     :param train_path: str
     :param test_path: str
     :param epcs: int
@@ -218,7 +219,14 @@ def multi_run(train_path: str, test_path: str, epcs: int, batch_size: int, mdls:
     return histories
 
 
-def get_classifier(images: tp.List[Image.Image], _model_path: str, class_dict) -> tp.List[str]:
+def get_classifier(images: tp.List[Image.Image], _model_path: str, class_dict: tp.Dict) -> np.ndarray:
+    """
+    get in classifier for every image in the list
+    :param images: tp.List[Image.Image]
+    :param _model_path: str
+    :param class_dict: tp.Dict
+    :return: np.ndarray
+    """
     images = [np.asarray(x, dtype="float32") / 255 for x in images]
     images = np.stack(images)
 
@@ -226,11 +234,10 @@ def get_classifier(images: tp.List[Image.Image], _model_path: str, class_dict) -
     test_preds_raw = _model.predict(images, verbose=0)
 
     test_preds = np.argmax(test_preds_raw, axis=1)
-    return [class_dict[x] for x in test_preds]
+    return np.vectorize(lambda x: class_dict[x])(test_preds)
 
 
-def get_multi_classifier(_images: tp.List[Image.Image], _model_paths: tp.List[str], class_dict: tp.Dict) -> tp.List[
-    tp.List[str]]:
+def get_multi_classifier(_images: tp.List[Image.Image], _model_paths: tp.List[str], class_dict: tp.Dict) -> np.ndarray:
     """
     Return the classifiers for every image in the list, tested with different neural networks
     :param _images: tp.List[Image.Image]
@@ -239,8 +246,19 @@ def get_multi_classifier(_images: tp.List[Image.Image], _model_paths: tp.List[st
     :return: tp.List[str]
     """
     classifiers = [get_classifier(_images, x, class_dict) for x in _model_paths]
-    classifiers = [[inner2] for inner in classifiers for inner2 in inner]
-    return classifiers
+    return np.array(classifiers).transpose()
+
+
+def single_classifier(_classifier: np.ndarray) -> str:
+    """
+    compare the classifiers per image and set them to mixed if different, or the single common value
+    :param _classifier: np.ndarray
+    :return: str
+    """
+    if all([x == y for x in _classifier for y in _classifier]):
+        return _classifier[0]
+    else:
+        return "mixed"
 
 
 if __name__ == "__main__":
@@ -260,7 +278,7 @@ if __name__ == "__main__":
 
     epochs, bch_size = 100, 16
 
-    nets = [applications.densenet.DenseNet121, applications.nasnet.NASNetMobile, applications.mobilenet_v2.MobileNetV2]
+    nets = [applications.mobilenet_v2.MobileNetV2, applications.resnet_v2.ResNet50V2]
     adam = Adam(lr=0.001, decay=1e-6)
 
     models = []
