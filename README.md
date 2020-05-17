@@ -7,7 +7,7 @@ Use Sentinel-2 (resolution 10m) data to for classification of the data points of
 1. rural: snow, desert, fields, forests
 2. urban: industrial area, or at least approx. 25% living space
 
-#indirect classes (not tested separately before the network)
+# Indirect classes (not tested separately before the network)
 3. error: black, or mostly black rasters
 4. others: exclude rasters from network, that are not part of the country, as other countries or open sea
 5. mixed: optional, several networks classified differently
