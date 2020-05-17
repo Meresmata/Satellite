@@ -227,6 +227,7 @@ def get_classifier(images: tp.List[Image.Image], _model_path: str, class_dict: t
     :param class_dict: tp.Dict
     :return: np.ndarray
     """
+    # noinspection PyTypeChecker
     images = [np.asarray(x, dtype="float32") / 255 for x in images]
     images = np.stack(images)
 
@@ -234,6 +235,8 @@ def get_classifier(images: tp.List[Image.Image], _model_path: str, class_dict: t
     test_preds_raw = _model.predict(images, verbose=0)
 
     test_preds = np.argmax(test_preds_raw, axis=1)
+
+    #  convert (als mapping) prediction from number to str
     return np.vectorize(lambda x: class_dict[x])(test_preds)
 
 
@@ -284,7 +287,7 @@ if __name__ == "__main__":
     models = []
     if not model_path:
         for net in nets:
-            models.append(create_net(net, img_height, img_width, num_classes=2))
+            models.append(create_net(net, img_height, img_width, num_classes=len(os.listdir(train_p))))
     else:
         for folder, _, files in os.walk(model_path):
             model_files = [file for file in files if file.endswith("hdf5")]

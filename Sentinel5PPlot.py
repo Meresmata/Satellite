@@ -106,13 +106,12 @@ if __name__ == '__main__':
     for path, _, files in os.walk(p_dir):
 
         if any([file.endswith("inner.pkl") for file in files]):
-
             file = [file for file in files if file.endswith("inner.pkl")][0]
             f = os.path.join(path, file)
             paths.append(f)
 
     # plot heat maps
-    with cf.ProcessPoolExecutor(max_workers=os.cpu_count()//2) as executor:
+    with cf.ProcessPoolExecutor(max_workers=os.cpu_count() // 2) as executor:
         hel = list(executor.map(plot_nation_data, paths))
     # hel = list(map(plot_nation_data, paths))
 
