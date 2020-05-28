@@ -131,12 +131,14 @@ def create_net(base_net: tp.Callable, img_h: int, img_w: int, num_classes: int):
     return mdl
 
 
-def run(train_path: str, test_path: str, epcs: int, batch_size: int, _mdl: Model, opt: tf.keras.optimizers):
+def run(train_path: str, test_path: str, save_dir: str, epcs: int, batch_size: int, _mdl: Model,
+        opt: tf.keras.optimizers):
     """
     train a single model, the model and the validation generator are used as global variable, to use both in the lambda callback,
     is there a better idea?
     :param train_path: str
     :param test_path: str
+    :param save_dir: str
     :param epcs: int
     :param batch_size: int
     :param opt: tf.keras.optimizers
@@ -144,7 +146,8 @@ def run(train_path: str, test_path: str, epcs: int, batch_size: int, _mdl: Model
     :return: history
     """
     # train the model
-    checker = ModelCheckpoint(monitor='val_loss', filepath='weights.{epoch:03d}-{val_accuracy:.3f}.hdf5',
+    path = save_dir + '/weights.{epoch:03d}-{val_accuracy:.3f}.hdf5'
+    checker = ModelCheckpoint(monitor='val_loss', filepath=path,
                               save_best_only=True, save_freq='epoch')
     shower = TensorBoard(histogram_freq=1)
     cm_callback = LambdaCallback(on_epoch_end=log_confusion_matrix)
@@ -170,9 +173,9 @@ def run(train_path: str, test_path: str, epcs: int, batch_size: int, _mdl: Model
     mdl = _mdl
 
     _loss = 'categorical_crossentropy' if train_gen.num_classes > 2 else 'binary_crossentropy'
-    mdl.compile(optimizer=opt, loss=_loss, metrics=['accuracy', 'mse'])
+    mdl.compile(optimizer=opt, loss=_loss, metrics=['accuracy'])
 
-    history = mdl.fit(train_gen, epochs=epcs, verbose=0, validation_data=val_gen,
+    history = mdl.fit(train_gen, epochs=epcs, validation_data=val_gen,
                       callbacks=[checker, shower, cm_callback]
                       )
 
@@ -200,12 +203,14 @@ def multi_eval(test_path: str, model_parent_path: str):
             print("{}, {}: {}".format(_folder, model_file, test_loss[1]))
 
 
-def multi_run(train_path: str, test_path: str, epcs: int, batch_size: int, mdls: tp.List[Model],
+def multi_run(train_path: str, test_path: str, save_dirs: tp.List[str], epcs: int, batch_size: int,
+              mdls: tp.List[Model],
               opt: tf.keras.optimizers):
     """
     train several networks on the same dataset
     :param train_path: str
     :param test_path: str
+    :param save_dirs: tp.List[str]
     :param epcs: int
     :param batch_size: int
     :param mdls: tp.List[Model]
@@ -213,8 +218,8 @@ def multi_run(train_path: str, test_path: str, epcs: int, batch_size: int, mdls:
     :return: tp.List[History]
     """
     histories = []
-    for _mdl in mdls:
-        histories.append(run(train_path, test_path, epcs, batch_size, _mdl, opt))
+    for save_dir, _mdl in zip(save_dirs, mdls):
+        histories.append(run(train_path, test_path, save_dir, epcs, batch_size, _mdl, opt))
 
     return histories
 
@@ -276,24 +281,32 @@ if __name__ == "__main__":
     model_path = args.model_path
 
     img_height, img_width = 214, 214
+    epochs, bch_size = 10, 16
 
     file_writer_cm = tf.summary.create_file_writer('logs/cm')
 
-    epochs, bch_size = 100, 16
+    save_paths = ["./mobilnetV2",
+                  "./ResNet50_V2",
+                  "./DenseNet201"]
 
-    nets = [applications.mobilenet_v2.MobileNetV2, applications.resnet_v2.ResNet50V2]
-    adam = Adam(lr=0.001, decay=1e-6)
+    nets = [applications.mobilenet_v2.MobileNetV2,
+            applications.resnet_v2.ResNet50V2,
+            applications.DenseNet201]
 
-    models = []
-    if not model_path:
-        for net in nets:
-            models.append(create_net(net, img_height, img_width, num_classes=len(os.listdir(train_p))))
-    else:
-        for folder, _, files in os.walk(model_path):
-            model_files = [file for file in files if file.endswith("hdf5")]
-            for file in model_files:
-                models.append(load_model(os.path.join(folder, file)))
+    for net, save_path in zip(nets, save_paths):
 
-    h = multi_run(train_p, test_p, epochs, bch_size, models, adam)
+        for learning_rate in [1e-4]:
+            for decay in [1e-6]:
+                print(save_path, learning_rate, decay)
+                adam = Adam(lr=learning_rate, decay=decay)
+                model = create_net(net, img_height, img_width,
+                                   num_classes=len(os.listdir(train_p)))
 
-    multi_eval(test_p, model_path)
+                # rename save_path to include learning rate and decay of the optimizer
+                save_path_new = "{}/lr{}_dc{}".format(save_path, learning_rate, decay)
+                if not os.path.exists(save_path_new):
+                    os.makedirs(save_path_new)
+
+                h = run(train_p, test_p, save_path_new, epochs, bch_size, model, adam)
+
+                model.save(save_path_new + "/final.hdf5")

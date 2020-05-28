@@ -8,100 +8,79 @@ from zipfile import ZipFile
 import geopandas
 import geopy.point as p
 import numpy as np
-import pandas as pd
 import pyproj
 from PIL import Image
 from geopy.distance import geodesic
 from satpy import find_files_and_readers
 from satpy.scene import Scene
 from sentinelsat import SentinelAPI
-from shapely.geometry import box, shape
+from shapely.geometry import box, Polygon
 from shapely.ops import transform
 from shapely.wkt import loads
 
 from h3_resolution import h3_res
 
 
-def download_best(_box: box, download_path: str, user: str, pw: str) -> tp.List[str]:
+def download_best(_box: Polygon, download_path: str, user: str, pw: str) -> tp.List[str]:
+    if _box is None:
+        raise AttributeError()
+
     _api = SentinelAPI(user, pw, 'https://scihub.copernicus.eu/dhus')
 
-    file_path = os.path.join(download_path, "save.csv")
+    products = _api.query(_box,
+                          date=('NOW-3MONTHS', 'NOW'),
+                          platformname='Sentinel-2',
+                          processinglevel='Level-1C',
+                          cloudcoverpercentage=(0, 10),
+                          )
+    products_df = _api.to_dataframe(products)
 
-    if not os.path.exists(file_path):
+    # sort products
+    products_df_sorted = products_df.sort_values(["cloudcoverpercentage"], ascending=[True])
 
-        products = _api.query(_box,
-                              date=('NOW-1MONTH', 'NOW'),
-                              platformname='Sentinel-2',
-                              processinglevel='Level-1C',
-                              cloudcoverpercentage=(0, 10),
-                              )
+    # sort out double tiles with higher cloud coverage
+    products_df_sorted_unique = products_df_sorted.groupby('tileid').head(1)
 
-        products_df = _api.to_dataframe(products)
-
-        tile_ids = []
-
-        def _unknown_tile_id(x: str, t_ids: tp.List) -> bool:
-            ret_val = x in t_ids
-            if not ret_val:
-                t_ids.append(x)
-
-            return not ret_val
-
-        # sort products
-        products_df_sorted = products_df.sort_values(["cloudcoverpercentage"], ascending=[True])
-
-        # sort out tiles double tiles with higher cloud coverage
-        first_tiles = [_unknown_tile_id(x, tile_ids) for x in list(products_df_sorted['tileid'].array)]
-        #  first_titles = np.vectorize(_unknown_tile_id(lambda x:x, tile_ids))(products_df_sorted['tileid'].array)
-        products_df_sorted_unique = products_df_sorted[first_tiles]
-
-        if not os.path.exists(download_path):
-            os.makedirs(download_path)
-        products_df_sorted_unique.to_csv(file_path)
-    else:
-        products_df_sorted_unique = pd.read_pickle(file_path)
-
-    products_df_sorted_unique['area'] = [__estimate_area(loads(e)) for e in
-                                         list(products_df_sorted_unique['footprint'].array)]
+    footprint = [loads(s) for s in products_df_sorted_unique['footprint']]
+    products_df_sorted_unique['area'] = list(map(__estimate_area, footprint))
 
     #  sort out areas smaller than three quarter of the full size of 100 km * 100 km
-    products_df_sorted_unique_larger = products_df_sorted_unique[
-        products_df_sorted_unique['area'] > 100000 * 100000 / 4 * 3]
+    min_area = 100000 * 100000 // 20 * 15  # 75 %
+    products_df_sorted_unique_larger = products_df_sorted_unique[products_df_sorted_unique['area'] > min_area]
 
     _api.download_all(products_df_sorted_unique_larger.uuid, download_path)
 
     # estimate area from footprint
+    return [os.path.join(download_path, x) for x in products_df_sorted_unique_larger.title]
 
-    return [os.path.join(download_path, x) for x in products_df_sorted_unique.title]
 
-
-def __estimate_area(s: shape) -> float:
-    #  TODO testing
-    proj = partial(pyproj.transform, pyproj.Proj(init="epsg:4326"), pyproj.Proj(init="epsg:3857"))
-
-    return transform(proj, s).area
+def __estimate_area(s: Polygon) -> float:
+    proj = partial(pyproj.transform, pyproj.Proj(init="epsg:4326"), pyproj.Proj(init="epsg:3395"))
+    area = transform(proj, s).area
+    return area
 
 
 def unzip_maps(folder_names: tp.List[str]) -> tp.List[str]:
     # unzip the folders
-    zip_files = ["{}.zip".format(name) for name in folder_names if not os.path.exists(name)]
-    for file in zip_files:
-        with ZipFile("{}.zip".format(file), 'r') as zipObj:
-            zipObj.extractall(file)
+    # create short names/tile names - short names need for max. path length restrictions, while unzipping
+    # list of old_name and short_name paths
+    folder_names = [[name, os.path.join(os.path.dirname(name), os.path.basename(name).split("_")[5])] for name in
+                    folder_names if not os.path.exists(name)]
+    zip_files = [name for name in folder_names if not os.path.exists(name[1])]
 
-    return folder_names
+    # TODO parallelize
+    for file in zip_files:
+        with ZipFile("{}.zip".format(file[0]), 'r') as zipObj:
+            zipObj.extractall(file[1])
+
+    return [name[1] for name in folder_names]
 
 
 def unzip_all_maps(download_dir: str) -> tp.List[str]:
-    folder_names = [file.rsplit(".", 1)[0] for file in os.listdir(download_dir) if file.endswith(".zip")]
+    folder_names = [os.path.join(download_dir, file.rsplit(".", 1)[0]) for file in os.listdir(download_dir) if
+                    file.endswith(".zip")]
     # unzip the folders
-    full_names = [os.path.join(download_dir, file) for file in folder_names]
-    sub_paths = [file for file in full_names if not os.path.exists(file)]
-    for file in sub_paths:
-        with ZipFile("{}.zip".format(file), 'r') as zipObj:
-            zipObj.extractall(file)
-
-    return full_names
+    return unzip_maps(folder_names)
 
 
 def create_coordinate(start_coord: tp.Tuple[float, float], x_offset: float, y_offset: float) -> tp.Tuple[float, float]:
@@ -136,7 +115,7 @@ def crop_image_by_coords(_scn: tp.Any, _box: tp.Tuple[float, float, float, float
     scene_llbox.save_dataset('true_color', filename, writer='simple_image', fill_value=0)
 
 
-def create_image(path: tp.Optional[str] = None) -> (Scene, tp.Optional[str]):
+def create_image(path: str) -> (Scene, tp.Optional[str]):
     """
     Create image of the given satellite data of a SentinelSat-2 satellite
     :param path: Path to the raw satellite data
@@ -147,15 +126,14 @@ def create_image(path: tp.Optional[str] = None) -> (Scene, tp.Optional[str]):
     _scn = Scene(filenames=files)
     _scn.load(['true_color'])
 
-    filename = None
-    if path is not None:
-        filename = os.path.join(path, 'RGB.tif')
-        if not os.path.exists(filename):
-            _scn.save_dataset('true_color', filename, writer='simple_image', fill_value=0)
+    filename = os.path.join(path, 'RGB.tif')
+    if not os.path.exists(filename):
+        _scn.save_dataset('true_color', filename, writer='simple_image', fill_value=0)
     return _scn, filename
 
 
-def create_xy_bbox(_scn: Scene, xy_dist: float) -> tp.Tuple[tp.List, tp.List]:
+def create_xy_bbox(_scn: Scene, xy_dist: float) -> tp.Tuple[tp.List[tp.Tuple[int, int, int, int]],
+                                                            tp.List[tp.Tuple[int, int, int, int]]]:
     """
     Prepare the boxes for to crop the satellite images.
     :param _scn: Scene
@@ -203,7 +181,7 @@ def crop_image_by_points(im: Image,
     return crop_im, filename
 
 
-def box_of_nation(nation: str) -> str:
+def box_of_nation(nation: str) -> Polygon:
     """
     Create a shapely box for a given Country
     :param nation: str
@@ -216,7 +194,7 @@ def box_of_nation(nation: str) -> str:
     return box(*nation.geometry.total_bounds)
 
 
-def shape_of_nation(nation: str) -> str:
+def shape_of_nation(nation: str) -> Polygon:
     """
     Create a shapely shape for a given Country
     :param nation: str
@@ -226,7 +204,7 @@ def shape_of_nation(nation: str) -> str:
     test_str = 'name=="{}"'.format(nation)
     nation = _world.query(test_str)
 
-    return nation.geometry
+    return nation.geometry.unary_union
 
 
 if __name__ == '__main__':

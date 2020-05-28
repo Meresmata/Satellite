@@ -2,14 +2,19 @@ import argparse
 import os
 import typing as tp
 import warnings
+from functools import partial
 
 import cupy
+import geopandas
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pyproj
+import pyproj.crs
 from PIL import Image, ImageDraw
 from satpy import scene
-from shapely.geometry import box
+from shapely.geometry import box, Polygon
+from shapely.ops import transform
 
 import SentinelSatDownload as Dwn
 import classificator as clf
@@ -37,7 +42,7 @@ class Patch:
         self.p_maxy = pixels[3] - 4
         self.img = _img
         self.coords = _coords
-        self.center = box(*_coords).centroid.coords
+        self.center = tuple(box(*_coords).centroid.coords)[0]
         self.system = map_system
 
         self._classifier: tp.Optional[str] = None
@@ -69,17 +74,22 @@ class Patch:
         """
         return self._classifier
 
+    def convert_degree(self, point):
+        out_proj = pyproj.Proj(init="epsg:4326")
+        in_proj = pyproj.Proj(self.system)
+        return pyproj.transform(in_proj, out_proj, *point)
+
 
 class SatelliteMap:
     """
     A given satellite map of a given size, with the range of of  coordinates in a distinct coordinate system
     """
 
-    def __init__(self, _img: Image.Image, _scn: scene, shape=None):
+    def __init__(self, _img: Image.Image, _scn: scene, shape: Polygon = None):
         """
         :param _img: Image
         :param _scn: scene, of the original satellite map
-        .:param shape: shape
+        .:param shape: shape in degrees
         """
         area = _scn['true_color'].attrs['area']
         self.__minx = area.area_extent[0]
@@ -90,10 +100,12 @@ class SatelliteMap:
         self.scn = _scn
 
         self.system: str = area.crs.srs  # epsg-code
-        self.shape = box(*area.area_extent) if shape is None else shape.intersection(box(*area.area_extent))
+        self.shape = box(*area.area_extent) if shape is None else transform_shape_to(shape, self.system).intersection(
+            box(*area.area_extent))
         self.__p_maxx = area.height
         self.__p_maxy = area.width
         self.patches: tp.Dict[str, Patch] = {}
+        self.name = str("RGB_{}".format([int(c) for c in area.area_extent]))
 
     def add_patch(self, _patch: Patch):
         """
@@ -112,8 +124,10 @@ class SatelliteMap:
         """
         _img = np.ones((self.__p_maxx, self.__p_maxy, 3), dtype="uint8")
         _img = _img * 255
+        p_minx, p_miny, p_center_long, p_center_lat, p_class = [], [], [], [], []
         for _patch in self.patches.values():
             _cls = _patch.get_classifier()
+            # create image color coding
             if _cls == "urban":
                 _img[_patch.p_miny:_patch.p_maxy, _patch.p_minx:_patch.p_maxx] = np.array([255, 0, 0])
             elif _cls == "rural":
@@ -124,6 +138,17 @@ class SatelliteMap:
                 _img[_patch.p_miny:_patch.p_maxy, _patch.p_minx:_patch.p_maxx] = np.array([255, 215, 0])
             elif _cls == "error":
                 _img[_patch.p_miny:_patch.p_maxy, _patch.p_minx:_patch.p_maxx] = np.array([0, 0, 0])
+
+            # create df for training
+            p_minx.append(int(_patch.coords[0]))
+            p_miny.append(int(_patch.coords[1]))
+            p_center_lat.append(_patch.center[0])
+            p_center_long.append(_patch.center[1])
+            p_class.append(_cls)
+
+        df = pd.DataFrame(data={"x-Coord": p_minx, "y-Coord": p_miny, "Latitude_m": p_center_lat,
+                                "Longitude_m": p_center_lat, "Classifier": p_class})
+        df.to_csv(image_path.rsplit(".", 1)[0] + ".csv")
 
         _img = Image.fromarray(_img)
 
@@ -143,15 +168,15 @@ class SatelliteMap:
         tmp = []
         for p_box, c_box in zip(pixel_boxes, coord_boxes):
             _img, _ = Dwn.crop_image_by_points(self.map, p_box, c_box)  # raw_map_path
-
             patch = Patch(_img, p_box, c_box, str(self), self.system)
 
+            # TODO vectorize --> use multiple CPUs
             # noinspection PyTypeChecker
-            if is_containing_black(cupy.asarray(_img)):
+            if is_containing_black(cupy.asarray(patch.img)):
                 # classify as black / error
                 patch.set_classifier("error")
                 self.add_patch(patch)
-            elif not self.shape.contains(box(*c_box)):
+            elif not self.shape.contains(box(*patch.coords)):
                 # classify as outer / sea
                 patch.set_classifier("outer")
                 self.add_patch(patch)
@@ -159,19 +184,24 @@ class SatelliteMap:
                 tmp.append(patch)
 
         imgs = [p.img for p in tmp]
-        classifier = clf.get_classifier(imgs, model_ps[0], cls_dict)
+        if len(imgs) > 0:
+            classifier = clf.get_classifier(imgs, model_ps[0], cls_dict)
 
-        temp_dict = {str(v.set_classifier(classifier[i])): v.set_classifier(classifier[i]) for i, v in enumerate(tmp)}
+            temp_dict = {str(v.set_classifier(classifier[i])): v.set_classifier(classifier[i]) for i, v in
+                         enumerate(tmp)}
 
-        self.patches.update(temp_dict)
+            self.patches.update(temp_dict)
+
+    def __str__(self):
+        return self.name
 
 
 class NationalMap:
 
     def __init__(self, _name: str, user_credentials: tp.Tuple[str, str], resolution: int = 7):
-        self.__box = Dwn.box_of_nation(_name)
+        self.box = Dwn.box_of_nation(_name)
         self.__shape = Dwn.shape_of_nation(_name)
-        self.__maps: tp.Dict[str, SatelliteMap] = {}
+        self.maps: tp.Dict[str, SatelliteMap] = {}
         self.__usr_name = user_credentials[0]
         self.__pw = user_credentials[1]
         self.name = _name
@@ -180,40 +210,53 @@ class NationalMap:
     def __str__(self):
         return self.name
 
-    def add_maps(self, folder: str, _box: tp.Optional[tp.Tuple] = None):
-        _box = _box if type(_box) is not None else self.__box
+    def add_local_maps(self, folder: str, _box: tp.Optional[tp.Tuple] = None):
+        _box = _box if _box is not None else self.box
+
+        if not os.path.exists(folder):
+            os.makedirs(folder)
+
         _zip_files = Dwn.download_best(_box, folder, self.__usr_name, self.__pw)
 
-        for _ in Dwn.unzip_maps(_zip_files):
-            _scn, path = Dwn.create_image()
+        for file in Dwn.unzip_maps(_zip_files):
+            _scn, path = Dwn.create_image(file)
             _img = Image.open(path)
 
-            sat_map = SatelliteMap(_img, _scn['true_color'].attrs['area'])
+            sat_map = SatelliteMap(_img, _scn, self.__shape)
 
-            self.__maps[str(sat_map)] = sat_map
+            self.maps[str(sat_map)] = sat_map
 
     def classify_all(self, cls_dict: tp.Dict):
 
         tmp: tp.List[Patch] = []
-        for name, _map in self.__maps.items():
+        delete_dict_keys = []
+        for name, _map in self.maps.items():
             pixel_boxes, coord_boxes = Dwn.create_xy_bbox(_map.scn, 2 * self.resolution * 1000)
 
-            for p_box, c_box in zip(pixel_boxes, coord_boxes):
-                _img, _ = Dwn.crop_image_by_points(_map.map, p_box, c_box)  # raw_map_path
+            # if whole map outside the nation
+            if _map.shape.is_empty:
+                # remove map from national map list
+                delete_dict_keys.append(name)
+            else:
+                # classify single patches
+                for p_box, c_box in zip(pixel_boxes, coord_boxes):
+                    _img, _ = Dwn.crop_image_by_points(_map.map, p_box, c_box)
+                    patch = Patch(_img, p_box, c_box, name, _map.system)
 
-                patch = Patch(_img, p_box, c_box, name, _map.system)
+                    # noinspection PyTypeChecker
+                    if is_containing_black(cupy.asarray(patch.img)):
+                        # classify as black / error
+                        patch.set_classifier("error")
+                        _map.add_patch(patch)
+                    elif not _map.shape.contains(box(*patch.coords)):
+                        # classify as outer / sea
+                        patch.set_classifier("outer")
+                        _map.add_patch(patch)
+                    else:
+                        tmp.append(patch)
 
-                # noinspection PyTypeChecker
-                if is_containing_black(cupy.asarray(_img)):
-                    # classify as black / error
-                    patch.set_classifier("error")
-                    _map.add_patch(patch)
-                elif not _map.shape.contains(coord_boxes):
-                    # classify as outer / sea
-                    patch.set_classifier("outer")
-                    _map.add_patch(patch)
-                else:
-                    tmp.append(patch)
+        # remove all maps from national map list, that are outside the mainland
+        [self.maps.pop(k) for k in delete_dict_keys]
 
         imgs = [p.img for p in tmp]
         classifier = clf.get_classifier(imgs, model_ps[0], cls_dict)
@@ -221,28 +264,41 @@ class NationalMap:
         tmp: tp.List[Patch] = [v.set_classifier(classifier[i]) for i, v in enumerate(tmp)]
 
         for temp_elem in tmp:
-            self.__maps[temp_elem.map_name].patches[str(temp_elem)] = temp_elem
+            self.maps[temp_elem.map_name].patches[str(temp_elem)] = temp_elem
 
-    def export_classification(self, path: str):
-        exportable: tp.List[Patch] = []
+    def export_classification(self, path: str) -> geopandas.GeoDataFrame:
+        exportable: tp.Dict = {}
 
-        for v_maps in self.__maps.values():
-            for v_patch in v_maps.patches.values():
-                if any([v_patch.center - elem.center > self.resolution for elem in exportable]):
-                    exportable.append(v_patch)
-                    #  TODO test for older patch classification, set mixed or too new one if older was black
+        # in which coordinate systems are the maps
+        systems = set([m.system for m in self.maps.values()])
 
-        # convert to EPSG 4326
-        longitudes, latitudes, classifications = [], [], []
-        out_proj = pyproj.Proj(init="epsg:4326")
+        for sys in systems:
+            for v_maps in self.maps.values():
+                for v_patch in v_maps.patches.values():
+                    if v_maps.system == sys:
+                        if sys in exportable:
+                            exportable[sys]["latitude"].append(v_patch.center[0])
+                            exportable[sys]["longitude"].append(v_patch.center[1])
+                            exportable[sys]["classifier"].append(v_patch.get_classifier())
+                            exportable[sys]["crs"].append(sys)
+                        else:
+                            exportable[sys] = {"latitude": [v_patch.center[0]], "longitude": [v_patch.center[1]],
+                                               "classifier": [v_patch.get_classifier()], "crs": [sys]}
 
-        for e in exportable:
-            in_proj = pyproj.Proj(e.system)
-            lon, lat = pyproj.transform(in_proj, out_proj, *e.center)
-            longitudes.append(lon), latitudes.append(lat), classifications.append(e.get_classifier())
+        # create a geoframe per coordinate system and convert those to EPSG 4326
+        # merge those geoframes
+        gdfs = []
+        for sys in exportable.keys():
+            df = pd.DataFrame(data=exportable[sys])
 
-        df = pd.DataFrame(list(zip(longitudes, latitudes, classifications)))
-        df.to_pickle(path)
+            geometry = geopandas.points_from_xy(df.latitude, df.longitude)
+            local_frame = geopandas.GeoDataFrame(df, geometry=geometry, crs=pyproj.crs.CRS(sys))
+            local_frame = local_frame.to_crs(4326)
+            gdfs.append(local_frame)
+
+        gdf = pd.concat(gdfs)
+        gdf.to_csv(path)
+        return gdf
 
 
 def is_containing_black(np_img: cupy.ndarray) -> bool:
@@ -253,6 +309,38 @@ def is_containing_black(np_img: cupy.ndarray) -> bool:
 
     # accept 85 % black pixels, #(pixels) = image_size // 3 (number of channels)
     return black_count > 0.15 * np_img.size // 3
+
+
+def transform_shape_to(s, system):
+    proj = partial(pyproj.transform, pyproj.Proj(init="epsg:4326"), pyproj.Proj(system))
+
+    return transform(proj, s)
+
+
+def paint_classification(geo: geopandas.GeoDataFrame, name: str, save_path):
+    world = geopandas.read_file(geopandas.datasets.get_path('naturalearth_lowres'))
+    _nation = world.query('name=="{}"'.format(name))
+
+    # Define base of the plot.
+    fig, ax = plt.subplots(figsize=(20, 20), dpi=100)
+
+    # Disable the axes
+    # ax.set_axis_off()
+
+    geo.plot(
+        column='classifier',  # Column defining the color
+        cmap='jet',  # Colormap
+        marker='H',  # marker layout. Here a Hexagon.
+        ax=ax,  # Base
+        markersize=2
+    )
+    ax.set_title('{} Classification'.format(name), fontsize=65)
+
+    # Plot the boundary of the countries on top
+    _nation.geometry.boundary.plot(color=None, edgecolor='black', ax=ax)
+
+    plt.savefig(save_path)
+    plt.close()
 
 
 if __name__ == "__main__":
@@ -288,14 +376,16 @@ if __name__ == "__main__":
     #
     #     coord_map.classify(args.resolution, {0: "rural", 1: "urban"})
     #
-    #     overlay = coord_map.create_raster_image()  # join(raw_map_path, "control.tif")
+    #     overlay = coord_map.create_raster_image(os.path.join(raw_map_path, "control.tif"))  # join(raw_map_path, "control.tif")
     #
-    #     #  overlayed = Image.blend(img, overlay, 0.15)
-    #     #  overlayed.save(os.path.join(raw_map_path, "test.tif"))
+    #     blended = Image.blend(img, overlay, 0.15)
+    #     blended.save(os.path.join(raw_map_path, "test.tif"))
 
     taiwan = NationalMap("Taiwan", (user_name, password))
 
-    # TODO testing
-    taiwan.add_maps(os.path.join(p_dir, str(taiwan)))
+    taiwan.add_local_maps(os.path.join(p_dir, str(taiwan)))
     taiwan.classify_all({0: "rural", 1: "urban"})
-    taiwan.export_classification(os.path.join(p_dir, "{}_cls.pkl".format(str(taiwan))))
+    tai = taiwan.export_classification(os.path.join(p_dir, "{}_cls.csv".format(str(taiwan))))
+
+    paint_classification(tai, "Taiwan", os.path.join(p_dir, "Taiwan.png"))
+    print("Finished")

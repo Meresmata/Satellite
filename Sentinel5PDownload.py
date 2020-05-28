@@ -180,7 +180,7 @@ if __name__ == '__main__':
 
     for country in countries:
         for year in [2019, 2020]:
-            for week in range(1, 15):
+            for week in range(1, 20):
                 download_sentinel5_cw(year, week, _country=country, _path=p_dir, product=gas, _filter="wed")
                 pass
 
