@@ -4,6 +4,22 @@ import os
 
 import geopandas
 import pandas as pd
+import s5a
+
+
+def reduce_resolution(df: geopandas.GeoDataFrame, resolution: int = 5):
+    """
+    save the data as pickled file (.pkl)  after filtering the values to with h3 to a resolution of
+    LEVEL 5. 8.54 * 0.866 is circa the radii of 7.4
+    LEVEL 6. 3.23 * 0.866 is circa the radii of 2.8
+    LEVEL 6. 1.22 * 0.866 is circa the radii of 1.6
+    :param df
+    :param resolution: int h3 resolution see: https://uber.github.io/h3/#/documentation/core-library/resolution-table
+    :return: None
+    """
+    df = s5a.point_to_h3(df, resolution=resolution)
+    df = s5a.aggregate_h3(df)
+    return s5a.h3_to_point(df)
 
 
 def filter_by_nation(df: geopandas.GeoDataFrame, nation: str) -> geopandas.GeoDataFrame:

@@ -8,6 +8,7 @@ import geopandas
 import pandas as pd
 import s5a
 import sentinel5dl
+import typing as tp
 
 
 def monday_of_calender_week(_year: int, _week: int) -> datetime:
@@ -23,7 +24,7 @@ def monday_of_calender_week(_year: int, _week: int) -> datetime:
 
 
 def download_sentinel5_offline(start_date: datetime, length: timedelta, _country_name: str = None, _path: str = ".",
-                               product: str = None) -> None:
+                               product: str = None) -> tp.List[str]:
     """
     Download the satellite data of a given start date for a given length. Filtered by Country Name,
     :param start_date: datetime
@@ -31,7 +32,7 @@ def download_sentinel5_offline(start_date: datetime, length: timedelta, _country
     :param _country_name: str
     :param _path: str
     :param product: str name of the Gas, Spectral Region
-    :return: None
+    :return: paths to the downloaded files
     """
     begin_date = '{}.000Z'.format(start_date.isoformat())
     end_date = '{}.999Z'.format((start_date + length).isoformat())
@@ -77,9 +78,11 @@ def download_sentinel5_offline(start_date: datetime, length: timedelta, _country
     # Download found products to the local folder
     sentinel5dl.download(products=result.get("products"), output_dir=_path)
 
+    return [os.path.join(_path, f['summary'][1].split(":")[1]) for f in result.get('products')]
+
 
 def download_sentinel5_cw(start_year: int, cw: int, _filter: str = None, _country: str = None, _path: str = ".",
-                          product: str = None) -> None:
+                          product: str = None) -> tp.List[str]:
     """
     Download the satellite data of Sentinel5 for a given year and calendar week. filtered my different categories
     of days and a given country
@@ -89,7 +92,7 @@ def download_sentinel5_cw(start_year: int, cw: int, _filter: str = None, _countr
     :param _country: str
     :param _path: str
     :param product: str name of the Gas, Spectral Region
-    :return: None
+    :return: the List of paths to the downloaded files
     """
     _filter = _filter.lower()
     if _filter not in ["weekend", "weekday", "mwf", "tt", "mon", "tue", "wed", "thu", "fri", "sat", "sun", None]:
@@ -124,23 +127,18 @@ def download_sentinel5_cw(start_year: int, cw: int, _filter: str = None, _countr
     elif _filter == "sun":
         dates = [6]
 
+    paths: tp.List[str] = []
     week_date = monday_of_calender_week(start_year, cw)
     delta = timedelta(days=0, hours=23, minutes=59, seconds=59)
     for date in dates:
         start_date = week_date + timedelta(days=date)
-        download_sentinel5_offline(start_date, delta, _country, _path, product)
+        paths.extend(download_sentinel5_offline(start_date, delta, _country, _path, product))
+
+    return paths
 
 
-def to_pickle(directory: str, resolution: int = 5) -> None:
-    """
-    save the data as pickled file (.pkl)  after filtering the values to with h3 to a resolution of
-    # LEVEL 5. 8.54 * 0.866 is circa the radii of 7.4
-    # LEVEL 6. 3.23 * 0.866 is circa the radii of 2.8
-    # LEVEL 6. 1.22 * 0.866 is circa the radii of 1.6
-    :param directory: str
-    :param resolution: int h3 resolution see: https://uber.github.io/h3/#/documentation/core-library/resolution-table
-    :return: None
-    """
+def to_pickle(directory: str) -> None:
+
     _files = [file for file in os.listdir(directory) if file.endswith(".nc")]
 
     data = []
@@ -154,11 +152,7 @@ def to_pickle(directory: str, resolution: int = 5) -> None:
 
     data = pd.concat(data, ignore_index=True)
 
-    data = s5a.point_to_h3(data, resolution=resolution)
-    data = s5a.aggregate_h3(data)
-    data = s5a.h3_to_point(data)
-
-    data.to_pickle(path=os.path.join(directory, "data.pkl"))
+    data.to_pickle(path=os.path.join(directory, "full_data.pkl"))
 
 
 if __name__ == '__main__':
@@ -180,11 +174,10 @@ if __name__ == '__main__':
 
     for country in countries:
         for year in [2019, 2020]:
-            for week in range(1, 20):
+            for week in range(4, 9):
                 download_sentinel5_cw(year, week, _country=country, _path=p_dir, product=gas, _filter="wed")
-                pass
 
-    # does not with with h3 on windows?
+    # does not work with h3 on windows?
     nc_path = []
     for path, _, files in os.walk(p_dir):
         nc_path.extend([path for file in files if file.endswith(".nc")])

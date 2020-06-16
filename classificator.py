@@ -2,6 +2,7 @@ import argparse
 import io
 import itertools
 import os
+import gc
 import typing as tp
 
 import matplotlib.pyplot as plt
@@ -11,7 +12,7 @@ from PIL import Image
 from six.moves import range
 from sklearn.metrics import confusion_matrix
 from tensorflow.keras import applications
-from tensorflow.keras.callbacks import TensorBoard, ModelCheckpoint, LambdaCallback
+from tensorflow.keras.callbacks import TensorBoard, ModelCheckpoint, LambdaCallback, EarlyStopping
 from tensorflow.keras.layers import Dense, Dropout, GlobalAveragePooling2D
 from tensorflow.keras.models import Model, load_model
 from tensorflow.keras.optimizers import Adam
@@ -19,6 +20,7 @@ from tensorflow.keras.preprocessing.image import ImageDataGenerator, DirectoryIt
 
 val_gen: DirectoryIterator
 mdl: Model
+mdl_name: str
 
 
 def log_confusion_matrix(epoch, logs):
@@ -32,7 +34,7 @@ def log_confusion_matrix(epoch, logs):
     # create list of 128 images, labels
     global val_gen
     global mdl
-    itx = 128 // bch_size
+    itx = 2048 // bch_size
     test_images, test_labels_raw = [], []
 
     for i in range(itx):
@@ -52,12 +54,17 @@ def log_confusion_matrix(epoch, logs):
     cm = confusion_matrix(test_labels, test_pred)
     # Log the confusion matrix as an image summary.
     figure = plot_confusion_matrix(cm, class_names=[x for x in val_gen.class_indices.keys()])
-    cm_image = plot_to_image(figure)
 
-    # Log the confusion matrix as an image summary.
-    with file_writer_cm.as_default():
-        tf.summary.image("Confusion Matrix", cm_image, step=epoch,
-                         description='with Validation loss: {}'.format(logs['val_loss']))
+    # when not training
+    if not logs:
+        figure.show()
+    else:
+        cm_image = plot_to_image(figure)
+
+        # Log the confusion matrix as an image summary.
+        with file_writer_cm.as_default():
+            tf.summary.image("Confusion Matrix", cm_image, step=epoch,
+                             description='with Validation loss: {}'.format(logs['val_loss']))
 
 
 def plot_confusion_matrix(cm, class_names):
@@ -68,18 +75,18 @@ def plot_confusion_matrix(cm, class_names):
     class_names (array, shape = [n]): String names of the integer classes
     """
 
+    # Normalize the confusion matrix.
+    cm = np.around(cm.astype('float') / cm.sum(axis=1)[:, np.newaxis], decimals=3)
+
     figure = plt.figure(figsize=(8, 8))
     plt.imshow(cm, interpolation='nearest', cmap='Blues')
-    plt.title("Confusion matrix")
+    plt.title("Confusion matrix \n {}".format(mdl_name))
     tick_marks = np.arange(len(class_names))
     plt.xticks(tick_marks, class_names, rotation=45)
     plt.yticks(tick_marks, class_names)
 
-    # Normalize the confusion matrix.
-    cm = np.around(cm.astype('float') / cm.sum(axis=1)[:, np.newaxis], decimals=2)
-
     # Use white text if squares are dark; otherwise black.
-    threshold = cm.max(initial=0) / 2.
+    threshold = 0.50
     for i, j in itertools.product(range(cm.shape[0]), range(cm.shape[1])):
         color = "white" if cm[i, j] > threshold else "black"
         plt.text(j, i, cm[i, j], horizontalalignment="center", color=color)
@@ -151,6 +158,7 @@ def run(train_path: str, test_path: str, save_dir: str, epcs: int, batch_size: i
                               save_best_only=True, save_freq='epoch')
     shower = TensorBoard(histogram_freq=1)
     cm_callback = LambdaCallback(on_epoch_end=log_confusion_matrix)
+    stopper = EarlyStopping(monitor='val_loss', patience=31)
 
     train_datagen = ImageDataGenerator(
         rescale=1. / 255,
@@ -176,7 +184,7 @@ def run(train_path: str, test_path: str, save_dir: str, epcs: int, batch_size: i
     mdl.compile(optimizer=opt, loss=_loss, metrics=['accuracy'])
 
     history = mdl.fit(train_gen, epochs=epcs, validation_data=val_gen,
-                      callbacks=[checker, shower, cm_callback]
+                      callbacks=[checker, stopper]
                       )
 
     return history
@@ -233,6 +241,7 @@ def get_classifier(images: tp.List[Image.Image], _model_path: str, class_dict: t
     :return: np.ndarray
     """
     # noinspection PyTypeChecker
+    gc.collect()
     images = [np.asarray(x, dtype="float32") / 255 for x in images]
     images = np.stack(images)
 
@@ -285,18 +294,30 @@ if __name__ == "__main__":
 
     file_writer_cm = tf.summary.create_file_writer('logs/cm')
 
-    save_paths = ["./mobilnetV2",
-                  "./ResNet50_V2",
-                  "./DenseNet201"]
+    save_paths = [
+                  # "./land_classification_5classes/mobilnetV2",
+                  # "./land_classification_5classes/ResNet50_V2",
+                  # "./land_classification_5classes/ResNet152_V2",
+                  "./land_classification_5classes/Xception",
+                  "./land_classification_5classes/InceptionResNetV2",
+                  "./land_classification_5classes/DenseNet201"
+    ]
 
-    nets = [applications.mobilenet_v2.MobileNetV2,
-            applications.resnet_v2.ResNet50V2,
-            applications.DenseNet201]
+    nets = [
+            # applications.mobilenet_v2.MobileNetV2,
+            # applications.resnet_v2.ResNet50V2,
+            # applications.resnet_v2.ResNet152V2,
+            applications.xception.Xception,
+            applications.InceptionResNetV2,
+            applications.DenseNet201
+    ]
+
+    decays = 0.45 / (len([i for x in os.listdir(train_p) for i in os.listdir(os.path.join(train_p, x))]) // bch_size)
 
     for net, save_path in zip(nets, save_paths):
-
+        mdl_name = save_path
         for learning_rate in [1e-4]:
-            for decay in [1e-6]:
+            for decay in [5 * decays, decays, decays / 5]:
                 print(save_path, learning_rate, decay)
                 adam = Adam(lr=learning_rate, decay=decay)
                 model = create_net(net, img_height, img_width,
@@ -310,3 +331,18 @@ if __name__ == "__main__":
                 h = run(train_p, test_p, save_path_new, epochs, bch_size, model, adam)
 
                 model.save(save_path_new + "/final.hdf5")
+
+    validation_datagen = ImageDataGenerator(rescale=1. / 255)
+    val_gen = validation_datagen.flow_from_directory(directory=test_p,
+                                                     target_size=(img_height, img_width),
+                                                     batch_size=16)
+
+    for path, _, files in os.walk(r".{}land_classification_5classes".format(os.path.sep)):
+        for f in files:
+            if f.endswith(".hdf5"):
+                model_path = os.path.join(path, f)
+                mdl_name = "{}\n{}\n{}".format(os.path.dirname(model_path).split(os.path.sep)[-2],
+                                               os.path.dirname(model_path).split(os.path.sep)[-1],
+                                               os.path.basename(model_path))
+                mdl = load_model(model_path)
+                log_confusion_matrix(epochs, None)

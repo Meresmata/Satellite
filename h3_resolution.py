@@ -17,3 +17,11 @@ h3_res = {0: 1107.712591000,
           14: 0.001348575,
           15: 0.000509713
           }
+
+
+def h3_radius(level: int) -> float:
+    """
+    :param level: h3 resolution level
+    :return: the radius of the h3 hexagon of level level in meter
+    """
+    return 0.866 * h3_res[level] * 1000.0

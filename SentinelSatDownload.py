@@ -6,6 +6,7 @@ from functools import partial
 from zipfile import ZipFile
 
 import geopandas
+import pandas as pd
 import geopy.point as p
 import numpy as np
 import pyproj
@@ -14,44 +15,76 @@ from geopy.distance import geodesic
 from satpy import find_files_and_readers
 from satpy.scene import Scene
 from sentinelsat import SentinelAPI
-from shapely.geometry import box, Polygon
-from shapely.ops import transform
+from shapely.geometry import box, Polygon, LineString
+from shapely.ops import transform, split
 from shapely.wkt import loads
 
-from h3_resolution import h3_res
+from h3_resolution import h3_radius
 
 
-def download_best(_box: Polygon, download_path: str, user: str, pw: str) -> tp.List[str]:
-    if _box is None:
+def split_polygon(polygon: Polygon) -> tp.List[Polygon]:
+    """
+    half the polygons so long until they are smaller than the size of two sentinel2 sat tiles
+    :param polygon: Polygon to be split
+    :return: list of splitted polygons
+    """
+    polys = []
+
+    if __estimate_area(polygon) > 100000 * 100000 // 2:
+        # split horizontal or vertical
+        split_vertical = polygon.bounds[3] - polygon.bounds[1] > polygon.bounds[2] - polygon.bounds[0]
+        line: LineString
+        if split_vertical:
+            line = LineString([(polygon.bounds[0], polygon.centroid.bounds[1]),
+                               (polygon.bounds[2], polygon.centroid.bounds[1])])
+        else:
+            line = LineString([(polygon.centroid.bounds[0], polygon.bounds[1]),
+                               (polygon.centroid.bounds[0], polygon.bounds[3])])
+
+        new = split(polygon, line)
+        new = [split_polygon(e) for e in new]
+        [polys.append(e) for li in new for e in li]
+    else:
+        polys.append(polygon)
+
+    return polys
+
+
+def download_best(boxes: tp.List[Polygon], download_path: str, user: str, pw: str) -> tp.List[str]:
+    if boxes is None:
         raise AttributeError()
 
     _api = SentinelAPI(user, pw, 'https://scihub.copernicus.eu/dhus')
+    products_dataframes = []
+    for _box in boxes:
 
-    products = _api.query(_box,
-                          date=('NOW-3MONTHS', 'NOW'),
-                          platformname='Sentinel-2',
-                          processinglevel='Level-1C',
-                          cloudcoverpercentage=(0, 10),
-                          )
-    products_df = _api.to_dataframe(products)
+        products = _api.query(_box,
+                              date=('NOW-1YEAR', 'NOW'),
+                              platformname='Sentinel-2',
+                              processinglevel='Level-1C',
+                              cloudcoverpercentage=(0, 10),
+                              )
+        products_df = _api.to_dataframe(products)
 
-    # sort products
-    products_df_sorted = products_df.sort_values(["cloudcoverpercentage"], ascending=[True])
+        # sort products
+        products_df_sorted = products_df.sort_values(["cloudcoverpercentage"], ascending=[True])
 
-    # sort out double tiles with higher cloud coverage
-    products_df_sorted_unique = products_df_sorted.groupby('tileid').head(1)
+        footprint = [loads(s) for s in products_df_sorted['footprint']]
+        products_df_sorted['area'] = list(map(__estimate_area, footprint))
 
-    footprint = [loads(s) for s in products_df_sorted_unique['footprint']]
-    products_df_sorted_unique['area'] = list(map(__estimate_area, footprint))
+        #  sort out areas smaller than three quarter of the full size of 100 km * 100 km
+        min_area = 100000 * 100000 // 20 * 17  # 85 %
+        products_df_sorted_larger = products_df_sorted[products_df_sorted['area'] > min_area]
+        products_df_sorted_larger = products_df_sorted_larger.groupby('tileid').head(1)
+        products_dataframes.append(products_df_sorted_larger.head(3))
 
-    #  sort out areas smaller than three quarter of the full size of 100 km * 100 km
-    min_area = 100000 * 100000 // 20 * 15  # 75 %
-    products_df_sorted_unique_larger = products_df_sorted_unique[products_df_sorted_unique['area'] > min_area]
+    products_df = pd.concat(products_dataframes)
+    products_df = products_df.groupby(['uuid']).head(1)
 
-    _api.download_all(products_df_sorted_unique_larger.uuid, download_path)
+    _api.download_all(products_df.uuid, download_path)
 
     # estimate area from footprint
-    return [os.path.join(download_path, x) for x in products_df_sorted_unique_larger.title]
+    return [os.path.join(download_path, x) for x in products_df.title]
 
 
 def __estimate_area(s: Polygon) -> float:
@@ -68,7 +101,6 @@ def unzip_maps(folder_names: tp.List[str]) -> tp.List[str]:
                     folder_names if not os.path.exists(name)]
     zip_files = [name for name in folder_names if not os.path.exists(name[1])]
 
-    # TODO parallelize
     for file in zip_files:
         with ZipFile("{}.zip".format(file[0]), 'r') as zipObj:
             zipObj.extractall(file[1])
@@ -93,8 +125,8 @@ def create_coordinate(start_coord: tp.Tuple[float, float], x_offset: float, y_of
     """
     start = p.Point(*start_coord)
 
-    dy = geodesic(kilometers=y_offset)
-    dx = geodesic(kilometers=x_offset)
+    dy = geodesic(meters=y_offset)
+    dx = geodesic(meters=x_offset)
 
     final = dy.destination(dx.destination(start, bearing=90), bearing=0)  # 90 = East, 0 = North...
     return final.longitude, final.latitude
@@ -141,9 +173,9 @@ def create_xy_bbox(_scn: Scene, xy_dist: float) -> tp.Tuple[tp.List[tp.Tuple[int
     :return: tp.Tuple[tp.List, tp.List] list of tuples of 1. pixels (left, upper, right, lower)
     and 2. coordinates (minx, miny, maxx, maxy)
     """
-    xs = _scn['true_color'].attrs['area'].projection_x_coords
-    ys = _scn['true_color'].attrs['area'].projection_y_coords
-    step = int(np.where(xs > xs[0] + xy_dist)[0][0]) + 1
+    xs = _scn['true_color'].attrs['area'].projection_x_coords.astype(int)
+    ys = _scn['true_color'].attrs['area'].projection_y_coords.astype(int)
+    step = int(np.where(xs > xs[0] + xy_dist)[0][0]) + 2
 
     pixel_boxes = []
     coord_boxes = []
@@ -229,7 +261,7 @@ if __name__ == '__main__':
     p_dir = args.path
     user_name = args.user
     password = args.password
-    r = float("{:04.2f}".format(h3_res[args.resolution] * 0.866))
+    r = float("{:06.0f}".format(h3_radius(args.resolution)))
 
     for coord in coords:
         box_pos = box(*create_coordinate(coord, -r, -r), *create_coordinate(coord, r, r))
@@ -244,6 +276,6 @@ if __name__ == '__main__':
 
         image = Image.open(o_path)
 
-        pixels_list, coords_list = create_xy_bbox(scn, 2 * r * 1000)
+        pixels_list, coords_list = create_xy_bbox(scn, 2 * r)
         for pxls, crds in zip(pixels_list, coords_list):
             crop_image_by_points(image, pxls, crds, raw_map)
