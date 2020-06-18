@@ -41,7 +41,7 @@ def get_osm_national_shapes(name: str) -> Polygon:
     return MultiPolygon(shapes)
 
 
-def get_osm_national_boundary(name: str):
+def get_osm_national_boundary(name: str) -> MultiPolygon:
     overpass_query_shape = """
     [out:json];
     rel
@@ -51,8 +51,10 @@ def get_osm_national_boundary(name: str):
     out geom qt;
     """.format(name)
 
-    shape = __osm_request(overpass_query_shape)['elements'][0]
-    return shape
+    shp = __osm_request(overpass_query_shape)['elements'][0]
+    shp = MultiPolygon([Polygon([tuple(i.values()) for i in s['geometry']])
+                        for s in shp['members'][2:-1] if s['role'] == 'outer'])
+    return shp
 
 
 def osm_export(point, radius):
